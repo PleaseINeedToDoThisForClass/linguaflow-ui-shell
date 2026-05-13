@@ -320,7 +320,7 @@ function Index() {
         const text = finalTranscript.trim();
         if (text) {
           clearSilenceTimer();
-          translate(text, speakerNow);
+          translate(text);
         } else if (activeRef.current) {
           // No final captured — restart only if still active and timer hasn't fired
           if (!gotResult && silenceTimerRef.current === null) {
