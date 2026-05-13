@@ -197,22 +197,28 @@ function Index() {
     window.speechSynthesis.speak(utter);
   };
 
-  const translate = async (text: string, speaker: Speaker) => {
-    const sourceLang =
-      speaker === "A" ? yourLangRef.current : theirLangRef.current;
-    const targetLanguage =
-      speaker === "A" ? theirLangRef.current : yourLangRef.current;
+  const translate = async (text: string) => {
+    const languageA = yourLangRef.current;
+    const languageB = theirLangRef.current;
     setStatus("translating");
     try {
       const res = await fetch("/api/translate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, targetLanguage }),
+        body: JSON.stringify({ text, languageA, languageB }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = (await res.json()) as { translation?: string };
+      const data = (await res.json()) as {
+        sourceLanguage?: string;
+        targetLanguage?: string;
+        translation?: string;
+      };
+      const sourceLang = data.sourceLanguage ?? languageA;
+      const targetLanguage = data.targetLanguage ?? languageB;
       const translation = data.translation ?? "";
       const langCode = LANG_CODES[targetLanguage] ?? "en-US";
+      // Speaker A = your-language side (left), Speaker B = their-language side (right)
+      const speaker: Speaker = sourceLang === languageA ? "A" : "B";
 
       setMessages((prev) => [
         ...prev,
@@ -227,9 +233,9 @@ function Index() {
         },
       ]);
 
-      const nextTurn: Speaker = speaker === "A" ? "B" : "A";
-      setTurn(nextTurn);
-      turnRef.current = nextTurn;
+      // Adapt recognition language to whoever just spoke (they may continue)
+      setTurn(speaker);
+      turnRef.current = speaker;
       if (activeRef.current) {
         startListening();
       } else {
@@ -238,7 +244,7 @@ function Index() {
     } catch (err) {
       console.error(err);
       setApiError(
-        "Translation failed. Please check your API key and try again.",
+        "Translation failed. Please try again.",
       );
       if (activeRef.current) {
         startListening();
