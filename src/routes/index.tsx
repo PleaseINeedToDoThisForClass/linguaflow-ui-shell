@@ -164,7 +164,7 @@ function Index() {
       setPauseBanner(true);
       setStatus("ready");
       setInterim("");
-      abortBoth();
+      stopListening();
     }, SILENCE_TIMEOUT_MS);
   };
 
