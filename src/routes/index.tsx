@@ -1,6 +1,15 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
-import { Mic, Square, ArrowLeftRight, Volume2, Copy, X } from "lucide-react";
+import {
+  Mic,
+  Square,
+  ArrowLeftRight,
+  Volume2,
+  Copy,
+  X,
+  Lock,
+  MessageCircle,
+} from "lucide-react";
 import {
   Select,
   SelectContent,
@@ -40,6 +49,9 @@ const LANG_CODES: Record<string, string> = {
   Korean: "ko-KR",
 };
 
+const SILENCE_TIMEOUT_MS = 20000;
+const END_CONFIRM_MS = 3000;
+
 type Status = "ready" | "listening" | "translating";
 type Speaker = "A" | "B";
 
@@ -47,7 +59,9 @@ type Message = {
   id: string;
   speaker: Speaker;
   original: string;
+  originalLang: string;
   translation: string;
+  translationLang: string;
   langCode: string;
 };
 
@@ -85,34 +99,21 @@ function StatusIndicator({ status }: { status: Status }) {
   );
 }
 
-const PLACEHOLDERS: Message[] = [
-  {
-    id: "p1",
-    speaker: "A",
-    original: "Hello, how are you doing today?",
-    translation: "Hola, ¿cómo estás hoy?",
-    langCode: "es-MX",
-  },
-  {
-    id: "p2",
-    speaker: "B",
-    original: "Muy bien, gracias. ¿Y tú?",
-    translation: "Very well, thanks. And you?",
-    langCode: "en-US",
-  },
-];
-
 function Index() {
   const [yourLang, setYourLang] = useState("English");
   const [theirLang, setTheirLang] = useState("Spanish");
   const [active, setActive] = useState(false);
+  const [paused, setPaused] = useState(false);
   const [status, setStatus] = useState<Status>("ready");
   const [turn, setTurn] = useState<Speaker>("A");
-  const [messages, setMessages] = useState<Message[]>(PLACEHOLDERS);
-  const [hasReal, setHasReal] = useState(false);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [interim, setInterim] = useState("");
   const [micError, setMicError] = useState<string | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
+  const [pauseBanner, setPauseBanner] = useState(false);
+  const [copyLabel, setCopyLabel] = useState(false);
+  const [playingId, setPlayingId] = useState<string | null>(null);
+  const [confirmEnd, setConfirmEnd] = useState(false);
 
   const recognitionRef = useRef<any>(null);
   const turnRef = useRef<Speaker>("A");
@@ -120,6 +121,11 @@ function Index() {
   const yourLangRef = useRef(yourLang);
   const theirLangRef = useRef(theirLang);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const endConfirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const sameLang = yourLang === theirLang;
 
   useEffect(() => {
     turnRef.current = turn;
@@ -138,14 +144,46 @@ function Index() {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, interim]);
 
+  const clearSilenceTimer = () => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+  };
+
+  const armSilenceTimer = () => {
+    clearSilenceTimer();
+    silenceTimerRef.current = setTimeout(() => {
+      // Pause session
+      activeRef.current = false;
+      setActive(false);
+      setPaused(true);
+      setPauseBanner(true);
+      setStatus("ready");
+      setInterim("");
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch {}
+        recognitionRef.current = null;
+      }
+    }, SILENCE_TIMEOUT_MS);
+  };
+
   const swap = () => {
+    if (active) return;
     setYourLang(theirLang);
     setTheirLang(yourLang);
   };
 
-  const speak = (text: string, langCode: string) => {
+  const speak = (id: string, text: string, langCode: string) => {
     if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+    // Cancel currently playing
     window.speechSynthesis.cancel();
+    if (playingId === id) {
+      setPlayingId(null);
+      return;
+    }
     const utter = new SpeechSynthesisUtterance(text);
     const voices = window.speechSynthesis.getVoices();
     const match =
@@ -153,10 +191,15 @@ function Index() {
       voices.find((v) => v.lang.startsWith(langCode.split("-")[0]));
     if (match) utter.voice = match;
     utter.lang = langCode;
+    utter.onend = () => setPlayingId((cur) => (cur === id ? null : cur));
+    utter.onerror = () => setPlayingId((cur) => (cur === id ? null : cur));
+    setPlayingId(id);
     window.speechSynthesis.speak(utter);
   };
 
   const translate = async (text: string, speaker: Speaker) => {
+    const sourceLang =
+      speaker === "A" ? yourLangRef.current : theirLangRef.current;
     const targetLanguage =
       speaker === "A" ? theirLangRef.current : yourLangRef.current;
     setStatus("translating");
@@ -171,24 +214,22 @@ function Index() {
       const translation = data.translation ?? "";
       const langCode = LANG_CODES[targetLanguage] ?? "en-US";
 
-      setMessages((prev) => {
-        const base = hasReal ? prev : [];
-        return [
-          ...base,
-          {
-            id: `${Date.now()}-${Math.random()}`,
-            speaker,
-            original: text,
-            translation,
-            langCode,
-          },
-        ];
-      });
-      setHasReal(true);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `${Date.now()}-${Math.random()}`,
+          speaker,
+          original: text,
+          originalLang: sourceLang,
+          translation,
+          translationLang: targetLanguage,
+          langCode,
+        },
+      ]);
 
-      // Flip turn and continue if still active
       const nextTurn: Speaker = speaker === "A" ? "B" : "A";
       setTurn(nextTurn);
+      turnRef.current = nextTurn;
       if (activeRef.current) {
         startListening();
       } else {
@@ -220,7 +261,6 @@ function Index() {
     }
 
     try {
-      // Stop any in-flight recognition
       if (recognitionRef.current) {
         try {
           recognitionRef.current.stop();
@@ -236,12 +276,16 @@ function Index() {
       recognition.lang = LANG_CODES[langName] ?? "en-US";
 
       let finalTranscript = "";
+      let gotResult = false;
 
       recognition.onstart = () => {
         setStatus("listening");
         setInterim("");
+        armSilenceTimer();
       };
       recognition.onresult = (event: any) => {
+        gotResult = true;
+        clearSilenceTimer();
         let interimText = "";
         for (let i = event.resultIndex; i < event.results.length; i++) {
           const result = event.results[i];
@@ -259,24 +303,24 @@ function Index() {
           setMicError(
             "Microphone access is required. Please allow access in your browser settings.",
           );
+          clearSilenceTimer();
+          activeRef.current = false;
           setActive(false);
           setStatus("ready");
-        } else if (event.error === "no-speech" || event.error === "aborted") {
-          // Restart silently if still active
-          if (activeRef.current) {
-            setTimeout(() => startListening(), 200);
-          } else {
-            setStatus("ready");
-          }
         }
       };
       recognition.onend = () => {
         setInterim("");
         const text = finalTranscript.trim();
         if (text) {
+          clearSilenceTimer();
           translate(text, speakerNow);
-        } else if (activeRef.current && status !== "translating") {
-          // Nothing captured — try again
+        } else if (activeRef.current) {
+          // No final captured — restart only if still active and timer hasn't fired
+          if (!gotResult && silenceTimerRef.current === null) {
+            // silence timer already fired -> session paused, do nothing
+            return;
+          }
           setTimeout(() => {
             if (activeRef.current) startListening();
           }, 200);
@@ -293,17 +337,26 @@ function Index() {
   const startSession = () => {
     setMicError(null);
     setApiError(null);
-    setTurn("A");
-    turnRef.current = "A";
+    setPauseBanner(false);
+
+    if (paused) {
+      // Resume — preserve turn and transcript
+      setPaused(false);
+    } else {
+      // Fresh start — reset
+      setMessages([]);
+      setTurn("A");
+      turnRef.current = "A";
+    }
     setActive(true);
     activeRef.current = true;
-    // Slight delay to ensure refs are committed
     setTimeout(() => startListening(), 50);
   };
 
-  const endSession = () => {
-    setActive(false);
+  const finalizeEnd = () => {
     activeRef.current = false;
+    setActive(false);
+    setPaused(false);
     if (recognitionRef.current) {
       try {
         recognitionRef.current.stop();
@@ -313,6 +366,8 @@ function Index() {
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.cancel();
     }
+    clearSilenceTimer();
+    setPlayingId(null);
     setTurn("A");
     turnRef.current = "A";
     setInterim("");
@@ -320,19 +375,44 @@ function Index() {
   };
 
   const toggleSession = () => {
-    if (active) endSession();
-    else startSession();
+    if (active) {
+      // Two-step confirm
+      if (confirmEnd) {
+        if (endConfirmTimerRef.current) clearTimeout(endConfirmTimerRef.current);
+        endConfirmTimerRef.current = null;
+        setConfirmEnd(false);
+        finalizeEnd();
+      } else {
+        setConfirmEnd(true);
+        if (endConfirmTimerRef.current) clearTimeout(endConfirmTimerRef.current);
+        endConfirmTimerRef.current = setTimeout(() => {
+          setConfirmEnd(false);
+          endConfirmTimerRef.current = null;
+        }, END_CONFIRM_MS);
+      }
+    } else {
+      startSession();
+    }
   };
 
   const copyTranscript = () => {
-    const real = hasReal ? messages : [];
-    const text = real
-      .map((m) => `${m.original}\n${m.translation}`)
+    if (messages.length === 0) return;
+    const text = messages
+      .map((m) => {
+        const personLabel = m.speaker === "A" ? "Person A" : "Person B";
+        return `[${personLabel} - ${m.originalLang}]: ${m.original}\n[Translation - ${m.translationLang}]: ${m.translation}`;
+      })
       .join("\n\n");
-    if (text && navigator.clipboard) {
+    if (navigator.clipboard) {
       navigator.clipboard.writeText(text).catch(() => {});
     }
+    setCopyLabel(true);
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = setTimeout(() => setCopyLabel(false), 2000);
   };
+
+  const startDisabled = sameLang;
+  const lockInputs = active;
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -341,6 +421,21 @@ function Index() {
           <span>{apiError}</span>
           <button
             onClick={() => setApiError(null)}
+            aria-label="Dismiss"
+            className="rounded p-1 hover:bg-white/10"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+
+      {pauseBanner && (
+        <div className="sticky top-0 z-40 flex items-center justify-between gap-3 border-b border-teal/30 bg-teal/15 px-4 py-3 text-sm text-teal-soft">
+          <span>
+            Session paused due to inactivity. Tap "Start Conversation" to resume.
+          </span>
+          <button
+            onClick={() => setPauseBanner(false)}
             aria-label="Dismiss"
             className="rounded p-1 hover:bg-white/10"
           >
@@ -358,13 +453,18 @@ function Index() {
         </header>
 
         {/* Language selectors */}
-        <div className="mb-4 flex items-end gap-2 sm:gap-3">
+        <div className="mb-2 flex items-end gap-2 sm:gap-3">
           <div className="flex-1 min-w-0">
-            <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+            <label className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
               Your Language
+              {lockInputs && <Lock className="h-3 w-3" />}
             </label>
-            <Select value={yourLang} onValueChange={setYourLang}>
-              <SelectTrigger className="w-full bg-card border-border">
+            <Select
+              value={yourLang}
+              onValueChange={setYourLang}
+              disabled={lockInputs}
+            >
+              <SelectTrigger className="w-full bg-card border-border disabled:opacity-60">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -379,18 +479,24 @@ function Index() {
 
           <button
             onClick={swap}
+            disabled={lockInputs}
             aria-label="Swap languages"
-            className="mb-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-border bg-card text-teal transition-colors hover:bg-teal hover:text-white"
+            className="mb-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-border bg-card text-teal transition-colors hover:bg-teal hover:text-white disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-card disabled:hover:text-teal"
           >
             <ArrowLeftRight className="h-4 w-4" />
           </button>
 
           <div className="flex-1 min-w-0">
-            <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+            <label className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
               Their Language
+              {lockInputs && <Lock className="h-3 w-3" />}
             </label>
-            <Select value={theirLang} onValueChange={setTheirLang}>
-              <SelectTrigger className="w-full bg-card border-border">
+            <Select
+              value={theirLang}
+              onValueChange={setTheirLang}
+              disabled={lockInputs}
+            >
+              <SelectTrigger className="w-full bg-card border-border disabled:opacity-60">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -404,10 +510,18 @@ function Index() {
           </div>
         </div>
 
+        {sameLang && (
+          <p className="mb-3 text-xs text-[oklch(0.78_0.14_70)]">
+            Please select two different languages.
+          </p>
+        )}
+        {!sameLang && <div className="mb-2" />}
+
         {/* Session button */}
         <button
           onClick={toggleSession}
-          className={`flex w-full items-center justify-center gap-3 rounded-2xl px-6 py-4 text-base font-semibold text-white shadow-lg transition-all active:scale-[0.99] ${
+          disabled={!active && startDisabled}
+          className={`flex w-full items-center justify-center gap-3 rounded-2xl px-6 py-4 text-base font-semibold text-white shadow-lg transition-all active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50 ${
             active
               ? "bg-[oklch(0.58_0.22_25)] hover:bg-[oklch(0.54_0.22_25)]"
               : "bg-teal hover:opacity-90"
@@ -416,7 +530,7 @@ function Index() {
           {active ? (
             <>
               <Square className="h-5 w-5 fill-white" />
-              End Session
+              {confirmEnd ? "Tap again to end" : "End Session"}
             </>
           ) : (
             <>
@@ -438,8 +552,16 @@ function Index() {
         {/* Transcript card */}
         <div className="glass flex flex-1 flex-col rounded-2xl p-4 sm:p-5 min-h-[300px]">
           <div className="flex-1 space-y-4 overflow-y-auto">
+            {messages.length === 0 && !interim && (
+              <div className="flex h-full min-h-[200px] flex-col items-center justify-center gap-3 text-muted-foreground">
+                <MessageCircle className="h-10 w-10 opacity-40" />
+                <p className="text-sm">Your conversation will appear here.</p>
+              </div>
+            )}
+
             {messages.map((m) => {
               const alignRight = m.speaker === "B";
+              const isPlaying = playingId === m.id;
               return (
                 <div
                   key={m.id}
@@ -458,11 +580,17 @@ function Index() {
                         {m.translation}
                       </p>
                       <button
-                        aria-label="Play translation"
-                        onClick={() => speak(m.translation, m.langCode)}
+                        aria-label={
+                          isPlaying ? "Stop playback" : "Play translation"
+                        }
+                        onClick={() => speak(m.id, m.translation, m.langCode)}
                         className="shrink-0 text-teal-soft hover:text-teal"
                       >
-                        <Volume2 className="h-3.5 w-3.5" />
+                        {isPlaying ? (
+                          <Square className="h-3.5 w-3.5 fill-current" />
+                        ) : (
+                          <Volume2 className="h-3.5 w-3.5" />
+                        )}
                       </button>
                     </div>
                   </div>
@@ -489,10 +617,11 @@ function Index() {
               variant="outline"
               size="sm"
               onClick={copyTranscript}
-              className="border-border bg-transparent text-muted-foreground hover:bg-white/5 hover:text-white"
+              disabled={messages.length === 0}
+              className="border-border bg-transparent text-muted-foreground hover:bg-white/5 hover:text-white disabled:opacity-50"
             >
               <Copy className="mr-2 h-3.5 w-3.5" />
-              Copy Transcript
+              {copyLabel ? "Copied!" : "Copy Transcript"}
             </Button>
           </div>
         </div>
