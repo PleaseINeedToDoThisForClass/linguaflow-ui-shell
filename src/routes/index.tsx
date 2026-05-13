@@ -115,21 +115,18 @@ function Index() {
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [confirmEnd, setConfirmEnd] = useState(false);
 
-  const recognizerARef = useRef<any>(null);
-  const recognizerBRef = useRef<any>(null);
-  const isRaceActiveRef = useRef(false);
+  const recognitionRef = useRef<any>(null);
   const translationInProgressRef = useRef(false);
   const turnRef = useRef<Speaker>("A");
   const activeRef = useRef(false);
   const yourLangRef = useRef(yourLang);
   const theirLangRef = useRef(theirLang);
+  const currentLangCodeRef = useRef<string>("en-US");
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const endConfirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pendingResultARef = useRef<{ transcript: string; confidence: number } | null>(null);
-  const pendingResultBRef = useRef<{ transcript: string; confidence: number } | null>(null);
 
   const sameLang = yourLang === theirLang;
 
