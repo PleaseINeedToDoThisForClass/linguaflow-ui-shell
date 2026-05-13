@@ -115,21 +115,18 @@ function Index() {
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [confirmEnd, setConfirmEnd] = useState(false);
 
-  const recognizerARef = useRef<any>(null);
-  const recognizerBRef = useRef<any>(null);
-  const isRaceActiveRef = useRef(false);
+  const recognitionRef = useRef<any>(null);
   const translationInProgressRef = useRef(false);
   const turnRef = useRef<Speaker>("A");
   const activeRef = useRef(false);
   const yourLangRef = useRef(yourLang);
   const theirLangRef = useRef(theirLang);
+  const currentLangCodeRef = useRef<string>("en-US");
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const endConfirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pendingResultARef = useRef<{ transcript: string; confidence: number } | null>(null);
-  const pendingResultBRef = useRef<{ transcript: string; confidence: number } | null>(null);
 
   const sameLang = yourLang === theirLang;
 
@@ -167,7 +164,7 @@ function Index() {
       setPauseBanner(true);
       setStatus("ready");
       setInterim("");
-      abortBoth();
+      stopListening();
     }, SILENCE_TIMEOUT_MS);
   };
 
@@ -235,29 +232,46 @@ function Index() {
 
       setTurn(speaker);
       turnRef.current = speaker;
+      // Tune next recognizer to the language the speaker just used
+      if (LANG_CODES[sourceLang]) {
+        currentLangCodeRef.current = LANG_CODES[sourceLang];
+      }
     } catch (err) {
       console.error(err);
       setApiError("Translation failed. Please try again.");
     } finally {
       translationInProgressRef.current = false;
       if (activeRef.current) {
-        startRace();
+        startListening();
       } else {
         setStatus("ready");
       }
     }
   };
 
-  const createRecognizer = (langCode: string) => {
+  const startListening = () => {
+    if (typeof window === "undefined") return;
+    if (translationInProgressRef.current) return;
+    if (!activeRef.current) return;
+
+    // Tear down any prior instance
+    stopListening();
+
     const SR =
       (window as any).SpeechRecognition ||
       (window as any).webkitSpeechRecognition;
-    if (!SR) return null;
+    if (!SR) {
+      setMicError(
+        "Speech recognition is not supported in this browser. Please use Chrome.",
+      );
+      return;
+    }
+
     const rec = new SR();
     rec.continuous = false;
     rec.interimResults = true;
     rec.maxAlternatives = 1;
-    rec.lang = langCode;
+    rec.lang = currentLangCodeRef.current;
 
     rec.onstart = () => {
       setStatus("listening");
@@ -269,33 +283,17 @@ function Index() {
     rec.onresult = (event: any) => {
       const result = event.results[event.results.length - 1];
       const transcript: string = result[0].transcript ?? "";
-      const confidence: number = result[0].confidence ?? 0;
 
-      if (
-        result.isFinal &&
-        isRaceActiveRef.current &&
-        !translationInProgressRef.current
-      ) {
-        if (langCode === LANG_CODES[yourLangRef.current]) {
-          pendingResultARef.current = { transcript: transcript.trim(), confidence };
-        } else {
-          pendingResultBRef.current = { transcript: transcript.trim(), confidence };
-        }
-
-        const resultA = pendingResultARef.current;
-        const resultB = pendingResultBRef.current;
-
-        if (resultA !== null && resultB !== null) {
-          isRaceActiveRef.current = false;
-          translationInProgressRef.current = true;
-          clearSilenceTimer();
-          setInterim("");
-          abortBoth();
-          const winner = resultA.confidence >= resultB.confidence ? resultA : resultB;
-          pendingResultARef.current = null;
-          pendingResultBRef.current = null;
-          translate(winner.transcript);
-        }
+      if (result.isFinal && !translationInProgressRef.current) {
+        const trimmed = transcript.trim();
+        if (trimmed.length === 0) return;
+        translationInProgressRef.current = true;
+        clearSilenceTimer();
+        setInterim("");
+        try {
+          rec.abort();
+        } catch {}
+        translate(trimmed);
       } else if (!result.isFinal) {
         clearSilenceTimer();
         armSilenceTimer();
@@ -314,113 +312,51 @@ function Index() {
         activeRef.current = false;
         setActive(false);
         setStatus("ready");
-        abortBoth();
+        stopListening();
         return;
       }
       console.error("Speech recognition error:", err);
       if (activeRef.current && !translationInProgressRef.current) {
-        setTimeout(() => {
+        if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
+        restartTimerRef.current = setTimeout(() => {
+          restartTimerRef.current = null;
           if (activeRef.current && !translationInProgressRef.current) {
-            startRace();
+            startListening();
           }
         }, 200);
       }
     };
 
     rec.onend = () => {
-      // If the race is still active and no winner was declared, restart it.
-      // continuous=false causes recognizers to end after each utterance/pause,
-      // so we must re-arm to keep listening.
-      if (
-        activeRef.current &&
-        isRaceActiveRef.current &&
-        !translationInProgressRef.current
-      ) {
-        // Debounce — both recognizers may end nearly simultaneously
+      // continuous=false ends after each utterance/pause; re-arm if still active
+      if (activeRef.current && !translationInProgressRef.current) {
         if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
         restartTimerRef.current = setTimeout(() => {
           restartTimerRef.current = null;
-          if (
-            activeRef.current &&
-            !translationInProgressRef.current
-          ) {
-            startRace();
+          if (activeRef.current && !translationInProgressRef.current) {
+            startListening();
           }
         }, 150);
       }
     };
 
-    return rec;
+    recognitionRef.current = rec;
+    setInterim("");
+    try {
+      rec.start();
+    } catch {}
   };
 
-  const abortBoth = () => {
-    isRaceActiveRef.current = false;
+  const stopListening = () => {
     if (restartTimerRef.current) {
       clearTimeout(restartTimerRef.current);
       restartTimerRef.current = null;
     }
-    if (recognizerARef.current) {
+    if (recognitionRef.current) {
       try {
-        recognizerARef.current.abort();
+        recognitionRef.current.abort();
       } catch {}
     }
-    if (recognizerBRef.current) {
-      try {
-        recognizerBRef.current.abort();
-      } catch {}
-    }
-    pendingResultARef.current = null;
-    pendingResultBRef.current = null;
-  };
-
-  const startRace = () => {
-    if (typeof window === "undefined") return;
-    if (translationInProgressRef.current) return;
-    if (!activeRef.current) return;
-
-    // Tear down any prior instances
-    abortBoth();
-    pendingResultARef.current = null;
-    pendingResultBRef.current = null;
-
-    const codeA = LANG_CODES[yourLangRef.current] ?? "en-US";
-    const codeB = LANG_CODES[theirLangRef.current] ?? "en-US";
-    const recA = createRecognizer(codeA);
-    const recB = createRecognizer(codeB);
-
-    if (!recA || !recB) {
-      setMicError(
-        "Speech recognition is not supported in this browser. Please use Chrome.",
-      );
-      return;
-    }
-
-    recognizerARef.current = recA;
-    recognizerBRef.current = recB;
-    isRaceActiveRef.current = true;
-    setInterim("");
-
-    try {
-      recA.start();
-    } catch {}
-    try {
-      recB.start();
-    } catch {}
-
-    setTimeout(() => {
-      if (!isRaceActiveRef.current || translationInProgressRef.current) return;
-      const resultA = pendingResultARef.current;
-      const resultB = pendingResultBRef.current;
-      const available = resultA ?? resultB;
-      if (available) {
-        isRaceActiveRef.current = false;
-        translationInProgressRef.current = true;
-        clearSilenceTimer();
-        setInterim("");
-        abortBoth();
-        translate(available.transcript);
-      }
-    }, 8000);
   };
 
   const startSession = () => {
@@ -438,16 +374,19 @@ function Index() {
     setActive(true);
     activeRef.current = true;
     translationInProgressRef.current = false;
-    setTimeout(() => startRace(), 50);
+    // Initial guess: listen in the current speaker's language
+    const initialLang =
+      turnRef.current === "A" ? yourLangRef.current : theirLangRef.current;
+    currentLangCodeRef.current = LANG_CODES[initialLang] ?? "en-US";
+    setTimeout(() => startListening(), 50);
   };
 
   const finalizeEnd = () => {
     activeRef.current = false;
     setActive(false);
     setPaused(false);
-    abortBoth();
-    recognizerARef.current = null;
-    recognizerBRef.current = null;
+    stopListening();
+    recognitionRef.current = null;
     translationInProgressRef.current = false;
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.cancel();

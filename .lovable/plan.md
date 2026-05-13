@@ -1,41 +1,56 @@
-# Fix: Dual Parallel SpeechRecognition Race
+# Fix: Speech recognition not registering anything
 
-Scope: only the speech-recognition setup inside `src/routes/index.tsx`. No UI, styling, backend, or unrelated logic changes. `/api/translate`, silence timeout, ghost text (interim), transcript rendering, speaker icons, copy, and end-session flow stay as-is.
+## Root cause
 
-## Changes in `src/routes/index.tsx`
+Chrome (and every other browser that ships the Web Speech API) only allows **one active `SpeechRecognition` instance per page/microphone at a time**. The current implementation in `src/routes/index.tsx` starts two recognizers in parallel (`recognizerARef` + `recognizerBRef`) and then waits for **both** to return a final result before translating.
 
-1. **Refs replace single recognizer**
-   - Remove `recognitionRef`.
-   - Add `recognizerARef`, `recognizerBRef` (hold `SpeechRecognition` instances).
-   - Add `isRaceActiveRef` and `translationInProgressRef` (boolean refs — needed inside recognizer callbacks; React state would be stale).
+Two things go wrong:
 
-2. **Recognizer factory** — `createRecognizer(langCode, sideRef)`:
-   - `continuous = false`, `interimResults = true`, `maxAlternatives = 1`, `lang = langCode`.
-   - `onstart`: set status `listening`, arm silence timer (only once per race — guarded so the second recognizer starting doesn't double-arm).
-   - `onresult`: per spec — take last result; if `isFinal && isRaceActiveRef.current && !translationInProgressRef.current` and (`confidence >= 0.55 || transcript.trim().length > 2`), flip flags, `abortBoth()`, call `translate(transcript)`. Otherwise, when not final, update `setInterim(transcript)` (ghost text). Clear silence timer on any result.
-   - `onerror`: ignore `aborted` and `no-speech`. For `not-allowed`/`denied`, keep the existing mic-permission error path (set `micError`, deactivate session). For all other errors, call `startRace()` to recover (only if session still active and not translating).
+1. Starting the second recognizer immediately aborts/errors the first (or vice versa). Often neither produces results.
+2. Even when one does fire, the new "wait for both pending results" logic (lines 285–298) blocks translation until the *other* recognizer also returns a final result. The other recognizer is tuned to a language the user isn't speaking, so it never returns one. The 8-second fallback is the only thing that ever fires — and only if a result was captured at all.
 
-3. **`startRace()`**:
-   - Guard: return if `translationInProgressRef.current` or `!activeRef.current`.
-   - Build fresh recognizers from current `yourLangRef`/`theirLangRef` (so language picks at session start are honored), assign to refs.
-   - Set `isRaceActiveRef.current = true`.
-   - `try { recognizerARef.current.start(); } catch {}` — same for B.
+Net effect from the user's perspective: speaking does nothing.
 
-4. **`abortBoth()`**:
-   - `try { recognizerARef.current?.abort(); } catch {}` — same for B.
-   - Set `isRaceActiveRef.current = false`.
+The earlier "race" approach was already fragile; layering "wait for both + pick higher confidence" on top made it fail completely. We need to abandon the dual-recognizer approach.
 
-5. **Wire into existing flow**:
-   - `startSession()` → call `startRace()` instead of `startListening()`.
-   - `translate()` success and failure branches: set `translationInProgressRef.current = false`, then `startRace()` (replaces the current `startListening()` calls). Remove the `setTurn`-driven language switch (race no longer needs it; `turn` is still updated for bubble alignment from the API response).
-   - `armSilenceTimer()` callback: call `abortBoth()` instead of `recognitionRef.current.stop()`.
-   - `finalizeEnd()` (End Session): call `abortBoth()` instead of `recognitionRef.current.stop()`; also null out the recognizer refs.
-   - Delete the now-unused `startListening()` function.
+## The fix: single recognizer, auto-switch language based on detection
 
-6. **No changes** to: language dropdowns, swap, `LANG_CODES` map (already matches the spec), silence timeout duration, interim/ghost text rendering, transcript bubbles, speaker TTS, copy, two-tap end confirm, banners, validation.
+Use **one** `SpeechRecognition` instance. Let the **server** detect the language (it already does — `/api/translate` returns `sourceLanguage`). Use that detection result to set the recognizer's `lang` for the *next* utterance.
 
-## Notes / edge cases
-- Both recognizers share the same mic stream; starting two `SpeechRecognition` instances in Chrome works because each opens its own underlying session against the same input device.
-- `onstart` will fire twice (once per recognizer); silence-timer arming and `setStatus("listening")` are idempotent, so this is safe.
-- `onend` from the loser (after `abort()`) is ignored because `isRaceActiveRef` is already false and `translationInProgressRef` is true — no auto-restart loop.
-- `confidence` can be `0`/`undefined` in some browsers; the `length > 2` fallback (per spec) covers that.
+This is the standard pattern for bilingual conversation apps and avoids the browser's single-recognizer constraint entirely. Trade-off: the very first utterance uses whichever language we guess (we'll alternate based on `turn`, same as the original pre-race version). After that, every subsequent utterance benefits from server-side detection.
+
+## Changes (all in `src/routes/index.tsx`)
+
+1. **Remove dual-recognizer state**
+   - Delete `recognizerARef`, `recognizerBRef`, `isRaceActiveRef`, `pendingResultARef`, `pendingResultBRef`, `restartTimerRef`.
+   - Add back a single `recognitionRef`.
+   - Keep `translationInProgressRef`.
+
+2. **Add `currentLangCodeRef`** — tracks which language the next recognizer instance should listen in. Initialized to `LANG_CODES[yourLang]` on session start; updated in `translate()` after the server returns `sourceLanguage` (we re-arm with the *detected* source language, since the same speaker is most likely to continue).
+
+3. **Replace `createRecognizer` / `startRace` / `abortBoth` with `startListening` / `stopListening`**
+   - `startListening()`: builds one recognizer with `continuous=false`, `interimResults=true`, `lang = currentLangCodeRef.current`. On `onresult` final → set `translationInProgressRef = true`, call `translate(transcript)`. On `onend` → if session still active and not translating, call `startListening()` again (debounced ~150ms) to keep the mic open. On `onerror` → keep existing not-allowed/denied handling; ignore `aborted`/`no-speech`; for other errors, restart after 200ms.
+   - `stopListening()`: aborts the single recognizer.
+
+4. **Update `translate()`**
+   - In the success branch, after computing `sourceLang`, set `currentLangCodeRef.current = LANG_CODES[sourceLang]` so the next utterance listens in the language the user just spoke.
+   - In `finally`, set `translationInProgressRef = false` and call `startListening()` (instead of `startRace()`).
+
+5. **Wire-up changes**
+   - `startSession()` → `currentLangCodeRef.current = LANG_CODES[yourLang]` (or `theirLang` based on `turn`), then `startListening()`.
+   - `armSilenceTimer()` callback → `stopListening()`.
+   - `finalizeEnd()` → `stopListening()`, null out `recognitionRef`.
+
+6. **Keep unchanged**: UI, status indicator, ghost text (interim), transcript bubbles, swap, copy, two-tap end confirm, silence timeout (20s), banners, `/api/translate` route, server-side language detection prompt.
+
+## Why this works
+
+- One recognizer = no browser conflict, mic actually captures audio.
+- Server already detects language from the transcript text — we leverage that instead of trying to detect it client-side via parallel recognizers.
+- After the first utterance, `currentLangCodeRef` tracks reality. If the speaker switches languages mid-conversation, the *first* utterance in the new language may be slightly less accurate (recognizer is still tuned to the previous language) but the server still detects it correctly and translates it; the *next* utterance is then tuned correctly. This matches how Google Translate's conversation mode behaves.
+
+## Out of scope
+
+- No changes to `src/routes/api/translate.ts`.
+- No UI, styling, or layout changes.
+- The 8-second fallback timer, "race", and "wait for both" logic are removed entirely (they were the bug).
