@@ -164,12 +164,7 @@ function Index() {
       setPauseBanner(true);
       setStatus("ready");
       setInterim("");
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.stop();
-        } catch {}
-        recognitionRef.current = null;
-      }
+      abortBoth();
     }, SILENCE_TIMEOUT_MS);
   };
 
@@ -220,7 +215,6 @@ function Index() {
       const targetLanguage = data.targetLanguage ?? languageB;
       const translation = data.translation ?? "";
       const langCode = LANG_CODES[targetLanguage] ?? "en-US";
-      // Speaker A = your-language side (left), Speaker B = their-language side (right)
       const speaker: Speaker = sourceLang === languageA ? "A" : "B";
 
       setMessages((prev) => [
@@ -236,111 +230,136 @@ function Index() {
         },
       ]);
 
-      // Adapt recognition language to whoever just spoke (they may continue)
       setTurn(speaker);
       turnRef.current = speaker;
-      if (activeRef.current) {
-        startListening();
-      } else {
-        setStatus("ready");
-      }
     } catch (err) {
       console.error(err);
-      setApiError(
-        "Translation failed. Please try again.",
-      );
+      setApiError("Translation failed. Please try again.");
+    } finally {
+      translationInProgressRef.current = false;
       if (activeRef.current) {
-        startListening();
+        startRace();
       } else {
         setStatus("ready");
       }
     }
   };
 
-  const startListening = () => {
-    if (typeof window === "undefined") return;
+  const createRecognizer = (langCode: string) => {
     const SR =
       (window as any).SpeechRecognition ||
       (window as any).webkitSpeechRecognition;
-    if (!SR) {
+    if (!SR) return null;
+    const rec = new SR();
+    rec.continuous = false;
+    rec.interimResults = true;
+    rec.maxAlternatives = 1;
+    rec.lang = langCode;
+
+    rec.onstart = () => {
+      setStatus("listening");
+      if (silenceTimerRef.current === null) {
+        armSilenceTimer();
+      }
+    };
+
+    rec.onresult = (event: any) => {
+      const result = event.results[event.results.length - 1];
+      const transcript: string = result[0].transcript ?? "";
+      const confidence: number = result[0].confidence ?? 0;
+
+      if (
+        result.isFinal &&
+        isRaceActiveRef.current &&
+        !translationInProgressRef.current
+      ) {
+        if (confidence >= 0.55 || transcript.trim().length > 2) {
+          isRaceActiveRef.current = false;
+          translationInProgressRef.current = true;
+          clearSilenceTimer();
+          setInterim("");
+          abortBoth();
+          translate(transcript.trim());
+        }
+      } else if (!result.isFinal) {
+        clearSilenceTimer();
+        armSilenceTimer();
+        setInterim(transcript);
+      }
+    };
+
+    rec.onerror = (event: any) => {
+      const err = event.error;
+      if (err === "aborted" || err === "no-speech") return;
+      if (err === "not-allowed" || err === "denied") {
+        setMicError(
+          "Microphone access is required. Please allow access in your browser settings.",
+        );
+        clearSilenceTimer();
+        activeRef.current = false;
+        setActive(false);
+        setStatus("ready");
+        abortBoth();
+        return;
+      }
+      console.error("Speech recognition error:", err);
+      if (activeRef.current && !translationInProgressRef.current) {
+        setTimeout(() => {
+          if (activeRef.current && !translationInProgressRef.current) {
+            startRace();
+          }
+        }, 200);
+      }
+    };
+
+    return rec;
+  };
+
+  const abortBoth = () => {
+    isRaceActiveRef.current = false;
+    if (recognizerARef.current) {
+      try {
+        recognizerARef.current.abort();
+      } catch {}
+    }
+    if (recognizerBRef.current) {
+      try {
+        recognizerBRef.current.abort();
+      } catch {}
+    }
+  };
+
+  const startRace = () => {
+    if (typeof window === "undefined") return;
+    if (translationInProgressRef.current) return;
+    if (!activeRef.current) return;
+
+    // Tear down any prior instances
+    abortBoth();
+
+    const codeA = LANG_CODES[yourLangRef.current] ?? "en-US";
+    const codeB = LANG_CODES[theirLangRef.current] ?? "en-US";
+    const recA = createRecognizer(codeA);
+    const recB = createRecognizer(codeB);
+
+    if (!recA || !recB) {
       setMicError(
         "Speech recognition is not supported in this browser. Please use Chrome.",
       );
       return;
     }
 
+    recognizerARef.current = recA;
+    recognizerBRef.current = recB;
+    isRaceActiveRef.current = true;
+    setInterim("");
+
     try {
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.stop();
-        } catch {}
-      }
-
-      const recognition = new SR();
-      recognition.continuous = false;
-      recognition.interimResults = true;
-      const speakerNow = turnRef.current;
-      const langName =
-        speakerNow === "A" ? yourLangRef.current : theirLangRef.current;
-      recognition.lang = LANG_CODES[langName] ?? "en-US";
-
-      let finalTranscript = "";
-      let gotResult = false;
-
-      recognition.onstart = () => {
-        setStatus("listening");
-        setInterim("");
-        armSilenceTimer();
-      };
-      recognition.onresult = (event: any) => {
-        gotResult = true;
-        clearSilenceTimer();
-        let interimText = "";
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const result = event.results[i];
-          if (result.isFinal) {
-            finalTranscript += result[0].transcript;
-          } else {
-            interimText += result[0].transcript;
-          }
-        }
-        setInterim(interimText);
-      };
-      recognition.onerror = (event: any) => {
-        console.error("Speech recognition error:", event.error);
-        if (event.error === "not-allowed" || event.error === "denied") {
-          setMicError(
-            "Microphone access is required. Please allow access in your browser settings.",
-          );
-          clearSilenceTimer();
-          activeRef.current = false;
-          setActive(false);
-          setStatus("ready");
-        }
-      };
-      recognition.onend = () => {
-        setInterim("");
-        const text = finalTranscript.trim();
-        if (text) {
-          clearSilenceTimer();
-          translate(text);
-        } else if (activeRef.current) {
-          // No final captured — restart only if still active and timer hasn't fired
-          if (!gotResult && silenceTimerRef.current === null) {
-            // silence timer already fired -> session paused, do nothing
-            return;
-          }
-          setTimeout(() => {
-            if (activeRef.current) startListening();
-          }, 200);
-        }
-      };
-
-      recognitionRef.current = recognition;
-      recognition.start();
-    } catch (err) {
-      console.error("Failed to start recognition:", err);
-    }
+      recA.start();
+    } catch {}
+    try {
+      recB.start();
+    } catch {}
   };
 
   const startSession = () => {
@@ -349,29 +368,26 @@ function Index() {
     setPauseBanner(false);
 
     if (paused) {
-      // Resume — preserve turn and transcript
       setPaused(false);
     } else {
-      // Fresh start — reset
       setMessages([]);
       setTurn("A");
       turnRef.current = "A";
     }
     setActive(true);
     activeRef.current = true;
-    setTimeout(() => startListening(), 50);
+    translationInProgressRef.current = false;
+    setTimeout(() => startRace(), 50);
   };
 
   const finalizeEnd = () => {
     activeRef.current = false;
     setActive(false);
     setPaused(false);
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch {}
-      recognitionRef.current = null;
-    }
+    abortBoth();
+    recognizerARef.current = null;
+    recognizerBRef.current = null;
+    translationInProgressRef.current = false;
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.cancel();
     }
