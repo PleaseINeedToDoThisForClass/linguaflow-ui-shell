@@ -312,6 +312,29 @@ function Index() {
       }
     };
 
+    rec.onend = () => {
+      // If the race is still active and no winner was declared, restart it.
+      // continuous=false causes recognizers to end after each utterance/pause,
+      // so we must re-arm to keep listening.
+      if (
+        activeRef.current &&
+        isRaceActiveRef.current &&
+        !translationInProgressRef.current
+      ) {
+        // Debounce — both recognizers may end nearly simultaneously
+        if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
+        restartTimerRef.current = setTimeout(() => {
+          restartTimerRef.current = null;
+          if (
+            activeRef.current &&
+            !translationInProgressRef.current
+          ) {
+            startRace();
+          }
+        }, 150);
+      }
+    };
+
     return rec;
   };
 
