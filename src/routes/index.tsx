@@ -369,6 +369,8 @@ function Index() {
         recognizerBRef.current.abort();
       } catch {}
     }
+    pendingResultARef.current = null;
+    pendingResultBRef.current = null;
   };
 
   const startRace = () => {
@@ -378,6 +380,8 @@ function Index() {
 
     // Tear down any prior instances
     abortBoth();
+    pendingResultARef.current = null;
+    pendingResultBRef.current = null;
 
     const codeA = LANG_CODES[yourLangRef.current] ?? "en-US";
     const codeB = LANG_CODES[theirLangRef.current] ?? "en-US";
@@ -402,6 +406,21 @@ function Index() {
     try {
       recB.start();
     } catch {}
+
+    setTimeout(() => {
+      if (!isRaceActiveRef.current || translationInProgressRef.current) return;
+      const resultA = pendingResultARef.current;
+      const resultB = pendingResultBRef.current;
+      const available = resultA ?? resultB;
+      if (available) {
+        isRaceActiveRef.current = false;
+        translationInProgressRef.current = true;
+        clearSilenceTimer();
+        setInterim("");
+        abortBoth();
+        translate(available.transcript);
+      }
+    }, 8000);
   };
 
   const startSession = () => {
