@@ -341,6 +341,10 @@ function Index() {
 
   const abortBoth = () => {
     isRaceActiveRef.current = false;
+    if (restartTimerRef.current) {
+      clearTimeout(restartTimerRef.current);
+      restartTimerRef.current = null;
+    }
     if (recognizerARef.current) {
       try {
         recognizerARef.current.abort();
