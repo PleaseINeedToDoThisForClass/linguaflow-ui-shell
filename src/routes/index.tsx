@@ -127,6 +127,7 @@ function Index() {
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const endConfirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const sameLang = yourLang === theirLang;
 
