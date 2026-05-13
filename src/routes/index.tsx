@@ -115,7 +115,10 @@ function Index() {
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [confirmEnd, setConfirmEnd] = useState(false);
 
-  const recognitionRef = useRef<any>(null);
+  const recognizerARef = useRef<any>(null);
+  const recognizerBRef = useRef<any>(null);
+  const isRaceActiveRef = useRef(false);
+  const translationInProgressRef = useRef(false);
   const turnRef = useRef<Speaker>("A");
   const activeRef = useRef(false);
   const yourLangRef = useRef(yourLang);
