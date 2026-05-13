@@ -128,6 +128,8 @@ function Index() {
   const endConfirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingResultARef = useRef<{ transcript: string; confidence: number } | null>(null);
+  const pendingResultBRef = useRef<{ transcript: string; confidence: number } | null>(null);
 
   const sameLang = yourLang === theirLang;
 
@@ -274,13 +276,25 @@ function Index() {
         isRaceActiveRef.current &&
         !translationInProgressRef.current
       ) {
-        if (confidence >= 0.55 || transcript.trim().length > 2) {
+        if (langCode === LANG_CODES[yourLangRef.current]) {
+          pendingResultARef.current = { transcript: transcript.trim(), confidence };
+        } else {
+          pendingResultBRef.current = { transcript: transcript.trim(), confidence };
+        }
+
+        const resultA = pendingResultARef.current;
+        const resultB = pendingResultBRef.current;
+
+        if (resultA !== null && resultB !== null) {
           isRaceActiveRef.current = false;
           translationInProgressRef.current = true;
           clearSilenceTimer();
           setInterim("");
           abortBoth();
-          translate(transcript.trim());
+          const winner = resultA.confidence >= resultB.confidence ? resultA : resultB;
+          pendingResultARef.current = null;
+          pendingResultBRef.current = null;
+          translate(winner.transcript);
         }
       } else if (!result.isFinal) {
         clearSilenceTimer();
@@ -355,6 +369,8 @@ function Index() {
         recognizerBRef.current.abort();
       } catch {}
     }
+    pendingResultARef.current = null;
+    pendingResultBRef.current = null;
   };
 
   const startRace = () => {
@@ -364,6 +380,8 @@ function Index() {
 
     // Tear down any prior instances
     abortBoth();
+    pendingResultARef.current = null;
+    pendingResultBRef.current = null;
 
     const codeA = LANG_CODES[yourLangRef.current] ?? "en-US";
     const codeB = LANG_CODES[theirLangRef.current] ?? "en-US";
@@ -388,6 +406,21 @@ function Index() {
     try {
       recB.start();
     } catch {}
+
+    setTimeout(() => {
+      if (!isRaceActiveRef.current || translationInProgressRef.current) return;
+      const resultA = pendingResultARef.current;
+      const resultB = pendingResultBRef.current;
+      const available = resultA ?? resultB;
+      if (available) {
+        isRaceActiveRef.current = false;
+        translationInProgressRef.current = true;
+        clearSilenceTimer();
+        setInterim("");
+        abortBoth();
+        translate(available.transcript);
+      }
+    }, 8000);
   };
 
   const startSession = () => {
