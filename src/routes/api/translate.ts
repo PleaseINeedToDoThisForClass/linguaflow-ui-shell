@@ -6,14 +6,15 @@ export const Route = createFileRoute("/api/translate")({
     handlers: {
       POST: async ({ request }: { request: Request }) => {
         try {
-          const { text, targetLanguage } = (await request.json()) as {
+          const { text, languageA, languageB } = (await request.json()) as {
             text?: string;
-            targetLanguage?: string;
+            languageA?: string;
+            languageB?: string;
           };
 
-          if (!text || !targetLanguage) {
+          if (!text || !languageA || !languageB) {
             return Response.json(
-              { error: "Missing text or targetLanguage" },
+              { error: "Missing text, languageA, or languageB" },
               { status: 400 },
             );
           }
@@ -26,7 +27,16 @@ export const Route = createFileRoute("/api/translate")({
             );
           }
 
-          const system = `You are a real-time spoken language interpreter. Translate the user's text into natural, conversational ${targetLanguage} exactly as a fluent native speaker would say it out loud in everyday speech. Avoid formal, written, or overly literal constructions. Never add explanations, notes, alternatives, or punctuation corrections. Return only the translated text and nothing else.`;
+          const system = `You are a real-time bilingual interpreter between ${languageA} and ${languageB}.
+
+Your job, for every input:
+1. Detect whether the input text is in ${languageA} or ${languageB}. Use linguistic cues; ignore minor transcription noise (mis-spelled words, missing accents, missing punctuation, capitalization).
+2. Translate the input into the OTHER of those two languages.
+3. The translation must sound like how a real native speaker would actually say it OUT LOUD in casual everyday conversation. Use the most common, natural phrasing — contractions, colloquial connectors, conversational rhythm. Avoid stiff, formal, textbook, or overly literal renderings. Match the speaker's tone (casual stays casual, polite stays polite).
+4. Output ONLY valid JSON in this exact shape, with no prose, code fences, or commentary before or after:
+{"sourceLanguage":"${languageA}" | "${languageB}","translation":"..."}
+
+The "translation" field contains only the translated sentence(s) — no quotes around it inside the JSON value beyond what JSON requires, no notes, no alternatives, no explanations.`;
 
           const res = await fetch(
             "https://ai.gateway.lovable.dev/v1/chat/completions",
@@ -39,6 +49,7 @@ export const Route = createFileRoute("/api/translate")({
               body: JSON.stringify({
                 model: "google/gemini-3-flash-preview",
                 max_tokens: 1024,
+                response_format: { type: "json_object" },
                 messages: [
                   { role: "system", content: system },
                   { role: "user", content: text },
@@ -71,8 +82,36 @@ export const Route = createFileRoute("/api/translate")({
           const data = (await res.json()) as {
             choices?: Array<{ message?: { content?: string } }>;
           };
-          const translation = data.choices?.[0]?.message?.content?.trim() ?? "";
-          return Response.json({ translation });
+          const raw = data.choices?.[0]?.message?.content?.trim() ?? "";
+
+          let sourceLanguage = languageA;
+          let translation = "";
+          try {
+            // Strip any accidental code fences
+            const cleaned = raw
+              .replace(/^```(?:json)?\s*/i, "")
+              .replace(/\s*```$/i, "")
+              .trim();
+            const parsed = JSON.parse(cleaned) as {
+              sourceLanguage?: string;
+              translation?: string;
+            };
+            if (
+              parsed.sourceLanguage === languageA ||
+              parsed.sourceLanguage === languageB
+            ) {
+              sourceLanguage = parsed.sourceLanguage;
+            }
+            translation = (parsed.translation ?? "").trim();
+          } catch {
+            // Fallback: treat raw as translation
+            translation = raw;
+          }
+
+          const targetLanguage =
+            sourceLanguage === languageA ? languageB : languageA;
+
+          return Response.json({ sourceLanguage, targetLanguage, translation });
         } catch (err) {
           console.error("Translate handler error:", err);
           return Response.json(
