@@ -128,6 +128,8 @@ function Index() {
   const endConfirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingResultARef = useRef<{ transcript: string; confidence: number } | null>(null);
+  const pendingResultBRef = useRef<{ transcript: string; confidence: number } | null>(null);
 
   const sameLang = yourLang === theirLang;
 
@@ -274,13 +276,25 @@ function Index() {
         isRaceActiveRef.current &&
         !translationInProgressRef.current
       ) {
-        if (confidence >= 0.55 || transcript.trim().length > 2) {
+        if (langCode === LANG_CODES[yourLangRef.current]) {
+          pendingResultARef.current = { transcript: transcript.trim(), confidence };
+        } else {
+          pendingResultBRef.current = { transcript: transcript.trim(), confidence };
+        }
+
+        const resultA = pendingResultARef.current;
+        const resultB = pendingResultBRef.current;
+
+        if (resultA !== null && resultB !== null) {
           isRaceActiveRef.current = false;
           translationInProgressRef.current = true;
           clearSilenceTimer();
           setInterim("");
           abortBoth();
-          translate(transcript.trim());
+          const winner = resultA.confidence >= resultB.confidence ? resultA : resultB;
+          pendingResultARef.current = null;
+          pendingResultBRef.current = null;
+          translate(winner.transcript);
         }
       } else if (!result.isFinal) {
         clearSilenceTimer();
